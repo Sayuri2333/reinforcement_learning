@@ -39,7 +39,8 @@ class Actor():  # Actor网络 与PolicyGradient网络相似
         self.exp = tf.reduce_mean(self.neg_log_prob * self.td_error)
 
         # 这里需要最大化当前策略的价值，因此需要最大化self.exp,即最小化-self.exp
-        self.train_op = tf.train.AdamOptimizer(LEARNING_RATE).minimize(-self.exp)
+        # 上面的注释有问题 原本softmax_cross_entropy_with_logits（）方法就是带负号的  至于为什么不要负号参照知乎
+        self.train_op = tf.train.AdamOptimizer(LEARNING_RATE).minimize(self.exp)
 
     def weight_variable(self, shape):
         initial = tf.truncated_normal(shape)

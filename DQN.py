@@ -1,157 +1,314 @@
+# coding:utf-8
+
+import os
 import gym
-import tensorflow as tf
-import numpy as np
 import random
-from collections import deque
+import numpy as np
+import tensorflow as tf
 
-# DQN超参数
-GAMMA = 0.9  #
-INITIAL_EPSILON = 0.5  # ε的初始值
-FINAL_EPSILON = 0.01  # ε的最终值
-REPLAY_SIZE = 10000  # 经验回放池的大小
-BATCH_SIZE = 32  # 每次提取的经验的多少
+from skimage.color import rgb2gray
+from skimage.transform import resize
+from skimage.exposure import rescale_intensity
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, Flatten, Dense
 
+GAME = 'BreakoutDeterministic-v4'
+FRAME_SIZE = 80
 
-class DQN():
-    # DQN Agent
-    def __init__(self, env):
-        # init experience replay
-        self.replay_buffer = deque()  # 使用deque构筑经验回放池
-        # init some parameters
-        self.time_step = 0  # 步数
-        self.epsilon = INITIAL_EPSILON  # 初始化ε
-        self.state_dim = env.observation_space.shape[0]  # 状态空间
-        self.action_dim = env.action_space.n  # 动作空间
+NUM_EXPLORING = 5000
+NUM_TRAINING = 100000
+NUM_TESTING = 25000
 
-        self.create_Q_network()  # 初始化Q网络
-        self.create_training_method()  # 初始化训练方法
+FRAME_STACKING = 4
+GAMMA = 0.99
+FIRST_EPSILON = 1
+FINAL_EPSILON = 0.1
+LEARNING_RATE = 0.00025
+REPLAY_MEMORY = 50000
+BATCH_SIZE = 32
+NUM_PLOT_EPISODE = 10
+NUM_UPDATE = NUM_TRAINING / 100
 
-        # 初始化session
-        self.session = tf.InteractiveSession()  # 使用tf.InteractiveSession能允许在进程启动后构建operation
-        self.session.run(tf.global_variables_initializer())  # 初始化全部变量
-
-    def create_Q_network(self):
-        # network weights
-        W1 = self.weight_variable([self.state_dim, 20])  # 第一层为self.state_dim -> 20
-        b1 = self.bias_variable([20])
-        W2 = self.weight_variable([20, self.action_dim])  # 第二层 20 -> self.action_dim 预计输出对应动作的Q-value
-        b2 = self.bias_variable([self.action_dim])
-        # input layer
-        self.state_input = tf.placeholder("float", [None, self.state_dim])  # 输入变量，None行是因为需要miniBatch处理
-        # hidden layers
-        h_layer = tf.nn.relu(tf.matmul(self.state_input, W1) + b1)  # 第一层到第二层需要经过relu激活函数
-        # Q Value layer
-        self.Q_value = tf.matmul(h_layer, W2) + b2  # 输出Q-value
-
-    def create_training_method(self):
-        self.action_input = tf.placeholder("float", [None, self.action_dim])  # 动作输入，是one-hot向量
-        self.y_input = tf.placeholder("float", [None])  # 更新后的y值
-        Q_action = tf.reduce_sum(tf.multiply(self.Q_value, self.action_input), reduction_indices=1)  # 对应action的Q值
-        self.cost = tf.reduce_mean(tf.square(self.y_input - Q_action))  # 计算loss
-        self.optimizer = tf.train.AdamOptimizer(0.0001).minimize(self.cost)  # 使用Adam法最小化loss
-
-    def perceive(self, state, action, reward, next_state, done):  # 接收新一组经验，并判断是否需要学习
-        one_hot_action = np.zeros(self.action_dim)  # 生成全0的动作向量
-        one_hot_action[action] = 1  # 根据接收的action位置生成action的one-hot向量
-        self.replay_buffer.append((state, one_hot_action, reward, next_state, done))  # 将经验加入经验回放池
-        if len(self.replay_buffer) > REPLAY_SIZE:  # 经验回放池已满
-            self.replay_buffer.popleft()  # 将最以前的经验弹出
-
-        if len(self.replay_buffer) > BATCH_SIZE:  # 如果经验数超过了miniBatch的数量
-            self.train_Q_network()  # 训练网络
-
-    def train_Q_network(self):
-        self.time_step += 1
-        # 从经验回放池中随机抽选一个minibatch
-        minibatch = random.sample(self.replay_buffer, BATCH_SIZE)
-        state_batch = [data[0] for data in minibatch]
-        action_batch = [data[1] for data in minibatch]
-        reward_batch = [data[2] for data in minibatch]
-        next_state_batch = [data[3] for data in minibatch]
-
-        # 计算每组经验对应的y值
-        y_batch = []
-        # 将next_state_batch送入神经网络，得出对应的Q_value_batch。 需要这个来计算y值
-        Q_value_batch = self.Q_value.eval(feed_dict={self.state_input: next_state_batch})
-        for i in range(0, BATCH_SIZE):  # 对于batch中的每组经验
-            done = minibatch[i][4]  # 根据是否为结尾状态
-            if done:
-                y_batch.append(reward_batch[i])  # 更新y值
-            else:
-                y_batch.append(reward_batch[i] + GAMMA * np.max(Q_value_batch[i]))
-
-        self.optimizer.run(feed_dict={
-            self.y_input: y_batch,  # y_batch用来计算loss
-            self.action_input: action_batch,  # action_batch用来计算Q_action
-            self.state_input: state_batch  # state_input用来计算Q_value
-        })
-
-    def egreedy_action(self, state):  # ε贪婪法
-        Q_value = self.Q_value.eval(feed_dict={
-            self.state_input: [state]
-        })[0]  # 将state输入神经网络，获得每个action对应Q_value
-        if random.random() <= self.epsilon:
-            self.epsilon -= (INITIAL_EPSILON - FINAL_EPSILON) / 10000  # ε收敛
-            return random.randint(0, self.action_dim - 1)  # 随便返回一个action
-        else:
-            self.epsilon -= (INITIAL_EPSILON - FINAL_EPSILON) / 10000
-            return np.argmax(Q_value)  # 返回Q_value最大值动作
-
-    def action(self, state):  # 完全贪婪法
-        return np.argmax(self.Q_value.eval(feed_dict={
-            self.state_input: [state]
-        })[0])  # 直接返回Q_value最大的动作
-
-    def weight_variable(self, shape):  # 根据shape创建并初始化权重
-        initial = tf.truncated_normal(shape)  # tf.truncated_normal生成shape形状的随机数数组
-        return tf.Variable(initial)  # 根据initial生成变量
-
-    def bias_variable(self, shape):  # 根据shape创建并初始化偏置
-        initial = tf.constant(0.01, shape=shape)
-        return tf.Variable(initial)
+IS_TRAIN = True
+LOAD_PATH = './DQN_NETWORK'
+SAVE_PATH = './DQN_NETWORK'
 
 
-# ---------------------------------------------------------
-# Hyper Parameters
-ENV_NAME = 'CartPole-v0'
-EPISODE = 3000  # 最大循环次数
-STEP = 300  # 每次循环最大步数
-TEST = 10  # 每100次循环后测试次数
+class DQN:
+    def __init__(self):
+        self.env = gym.make(GAME)
 
+        self.num_actions = self.env.action_space.n
+        self.epsilon = FIRST_EPSILON
+        self.progress = ''
 
-def main():
-    # 初始化环境以及DQN
-    env = gym.make(ENV_NAME)
-    agent = DQN(env)
+        self.step = 1
+        self.score = 0
+        self.episode = 0
 
-    for episode in range(EPISODE):
-        # 初始化环境 并获得初始状态
-        state = env.reset()
-        # 训练环节
-        for step in range(STEP):
-            action = agent.egreedy_action(state)  # ε贪婪法选择动作
-            next_state, reward, done, _ = env.step(action)  # 执行动作
-            # 只要不死 每一帧加0.1reward
-            reward = -1 if done else 0.1
-            agent.perceive(state, action, reward, next_state, done)  # 加入经验回放池并训练
-            state = next_state  # 下一个状态
-            if done:
+        self.replay_memory = []
+
+        self.Num_Exploration = NUM_EXPLORING
+        self.Num_Training = NUM_TRAINING
+        self.Num_Testing = NUM_TESTING
+
+        self.loss = 0
+        self.maxQ = 0
+        self.score_board = 0
+        self.maxQ_board = 0
+        self.loss_board = 0
+        self.step_old = 0
+
+        self.s, self.Q, self.model = self.network()
+        self.st, self.Qt, self.target_model = self.network()
+        network_weights = self.model.trainable_weights
+        target_network_weights = self.target_model.trainable_weights
+
+        self.update_target_network = [target_network_weights[i].assign(network_weights[i]) for i in
+                                      range(len(target_network_weights))]
+        self.sess, self.saver, self.summary_placeholders, self.update_ops, self.summary_op, self.summary_writer = self.init_sess()
+
+    def main(self):
+        observation = self.env.reset()
+        state = self.process_image(observation)
+        state_set = np.stack(tuple([state] * FRAME_STACKING), axis=2)
+        # state_set = state_set.reshape(1, state_set.shape[0], state_set.shape[1], state_set.shape[2])
+
+        while True:
+            self.progress = self.get_progress()
+            action = self.select_action(state_set)
+
+            next_observation, reward, terminal, _ = self.env.step(np.argmax(action))
+            next_state = self.process_image(next_observation)
+            next_state = next_state.reshape(next_state.shape[0], next_state.shape[1], 1)
+            # print(next_state.shape)
+            # print('state_set shape: ' + str(state_set.shape))
+            next_state_set = np.append(next_state, state_set[:, :, :3], axis=2)
+
+            self.experience_replay(state_set, action, reward, next_state_set, terminal)
+
+            if self.progress == "Training":
+                if self.step % NUM_UPDATE == 0:
+                    self.sess.run(self.update_target_network)
+
+                self.train(self.replay_memory, self.model, self.target_model)
+
+                self.save_model()
+
+            state_set = next_state_set
+            self.score += reward
+            self.step += 1
+
+            self.plotting(terminal)
+
+            if terminal:
+                state_set = self.if_terminal()
+
+            if self.progress == 'Finished':
+                print("Finished!")
                 break
-        # 每100次循环进行一次test
-        if episode % 100 == 0:
-            total_reward = 0  # 初始化总reward
-            for i in range(TEST):  # 测试TEST次
-                state = env.reset()  # 初始化状态
-                for j in range(STEP):
-                    env.render()  # 渲染下一帧环境
-                    action = agent.action(state)  # 贪婪法选择动作
-                    state, reward, done, _ = env.step(action)  # 执行动作
-                    total_reward += reward  # 累加reward
-                    if done:
-                        break
-            ave_reward = total_reward / TEST  # 计算平均reward
-            print('episode: ', episode, 'Evaluation Average Reward:', ave_reward)
+
+    def network(self):
+        model = Sequential()
+        model.add(Conv2D(32, 8, (4, 4), activation='relu', padding='same',
+                         input_shape=(FRAME_SIZE, FRAME_SIZE, FRAME_STACKING),
+                         kernel_initializer=tf.keras.initializers.glorot_uniform(),
+                         bias_initializer=tf.keras.initializers.glorot_uniform()))
+        model.add(Conv2D(64, 4, (2, 2), activation='relu', padding='same',
+                         kernel_initializer=tf.keras.initializers.glorot_uniform(),
+                         bias_initializer=tf.keras.initializers.glorot_uniform()))
+        model.add(Conv2D(64, 3, (1, 1), activation='relu', padding='same',
+                         kernel_initializer=tf.keras.initializers.glorot_uniform(),
+                         bias_initializer=tf.keras.initializers.glorot_uniform()))
+        model.add(Flatten())
+        model.add(Dense(512, activation='relu', kernel_initializer=tf.keras.initializers.glorot_uniform(),
+                        bias_initializer=tf.keras.initializers.glorot_uniform()))
+        model.add(Dense(self.num_actions, kernel_initializer=tf.keras.initializers.glorot_uniform(),
+                        bias_initializer=tf.keras.initializers.glorot_uniform()))
+        model.compile(loss='mse', optimizer=tf.keras.optimizers.Adam(lr=LEARNING_RATE, epsilon=1e-02))
+
+        state = tf.placeholder(tf.float32, [None, FRAME_SIZE, FRAME_SIZE, FRAME_STACKING])
+        # state = (state - (255.0 / 2)) / (255.0 / 2)
+        q_values = model(state)
+
+        return state, q_values, model
+
+    def init_sess(self):
+        # 初始化
+        config = tf.ConfigProto()
+        config.gpu_options.allow_growth = True
+
+        sess = tf.InteractiveSession(config=config)
+
+        # 新建用于存储数据的文件夹
+        os.makedirs(SAVE_PATH)
+
+        # Summary for tensorboard
+        summary_placeholders, update_ops, summary_op = self.setup_summary()
+        summary_writer = tf.summary.FileWriter(SAVE_PATH, sess.graph)
+
+        init = tf.global_variables_initializer()
+        sess.run(init)  # 初始化变量
+
+        # 如果有文件的话读档
+        saver = tf.train.Saver()
+
+        if not IS_TRAIN:
+            # IS_TRAIN为False时
+            saver.restore(sess, LOAD_PATH + "/model.ckpt")  # 读取模型
+            print("Model restored.")
+            self.Num_Exploration = 0
+            self.Num_Training = 0  # 探索和训练需要的步数都设置为0
+
+        return sess, saver, summary_placeholders, update_ops, summary_op, summary_writer
+
+    def setup_summary(self):
+        episode_score = tf.Variable(0.)
+        episode_maxQ = tf.Variable(0.)
+        episode_loss = tf.Variable(0.)
+
+        tf.summary.scalar('Average Score/' + str(NUM_PLOT_EPISODE) + ' episodes', episode_score)
+        tf.summary.scalar('Average MaxQ/' + str(NUM_PLOT_EPISODE) + ' episodes', episode_maxQ)
+        tf.summary.scalar('Average Loss/' + str(NUM_PLOT_EPISODE) + ' episodes', episode_loss)  # 新建需要追踪的标量
+
+        summary_vars = [episode_score, episode_maxQ, episode_loss]
+
+        summary_placeholders = [tf.placeholder(tf.float32) for _ in range(len(summary_vars))]  # 新建placeholder用于获得数值
+        update_ops = [summary_vars[i].assign(summary_placeholders[i]) for i in range(len(summary_vars))]  # 更新操作
+        summary_op = tf.summary.merge_all()
+        return summary_placeholders, update_ops, summary_op
+
+    def process_image(self, observation):
+        observation = rgb2gray(observation)
+        observation = resize(observation, (FRAME_SIZE, FRAME_SIZE))
+        observation = rescale_intensity(observation, out_range=(0, 255))
+        return observation
+
+    def get_progress(self):
+        progress = ''
+        if self.step <= self.Num_Exploration:
+            progress = 'Exploring'
+        elif self.step <= self.Num_Exploration + self.Num_Training:
+            progress = 'Training'
+        elif self.step <= self.Num_Exploration + self.Num_Training + self.Num_Testing:
+            progress = 'Testing'
+        else:
+            progress = 'Finished'
+
+        return progress
+
+    def select_action(self, state_set):  # 根据给定state以及当前阶段选择动作
+        action = np.zeros([self.num_actions])
+
+        # 探索阶段随机选择
+        if self.progress == 'Exploring':
+            # 随机选
+            action_index = random.randint(0, self.num_actions - 1)
+            action[action_index] = 1
+
+        # training阶段使用ε-greedy方法选择
+        elif self.progress == 'Training':
+            if random.random() < self.epsilon:
+                # 随机选
+                action_index = random.randint(0, self.num_actions - 1)
+                action[action_index] = 1
+            else:
+                # 最优选
+                Q_value = self.Q.eval(feed_dict={self.s: [state_set]})
+                action_index = np.argmax(Q_value)
+                action[action_index] = 1
+                self.maxQ = np.max(Q_value)
+
+            # ε的值随着每次select递减
+            if self.epsilon > FINAL_EPSILON:
+                self.epsilon -= FIRST_EPSILON / NUM_TRAINING
+
+        elif self.progress == 'Testing':
+            # 测试阶段直接选择最优动作
+            Q_value = self.Q.eval(feed_dict={self.s: [state_set]})
+            action_index = np.argmax(Q_value)
+            action[action_index] = 1
+            self.maxQ = np.max(Q_value)
+
+            self.epsilon = 0
+
+        return action
+
+    def experience_replay(self, state, action, reward, next_state, terminal):
+        if len(self.replay_memory) >= REPLAY_MEMORY:
+            del self.replay_memory[0]
+        self.replay_memory.append([state, action, reward, next_state, terminal])
+
+    def train(self, replay_memory, model, target_model):
+        minibatch = random.sample(replay_memory, BATCH_SIZE)
+
+        state_batch = np.array([batch[0] for batch in minibatch])
+        action_one_hot_batch = np.array([batch[1] for batch in minibatch])
+        action_batch = np.argmax(action_one_hot_batch, axis=1)
+        reward_batch = np.array([batch[2] for batch in minibatch])
+        # print("reward: " + str(reward_batch[0]))
+        next_state_batch = np.array([batch[3] for batch in minibatch])
+        terminal_batch = np.array([batch[4] for batch in minibatch])
+
+        Q_batch = model.predict(state_batch)
+        # print('Q batch: ' + str(Q_batch[0]))
+        target_Q_batch = target_model.predict(next_state_batch)
+        Q_batch[range(BATCH_SIZE), action_batch] = reward_batch + GAMMA * (1 - terminal_batch) * np.max(
+            target_Q_batch, axis=1)
+        # print('modified Q batch: ' + str(Q_batch[0]))
+        self.loss = model.train_on_batch(state_batch, Q_batch)
+        # print("loss: " + str(self.loss))
+
+    def save_model(self):
+        if self.step == self.Num_Exploration + self.Num_Training:
+            save_path = self.saver.save(self.sess, SAVE_PATH + "/model.ckpt")
+            print("Model Saved!")
+
+    def plotting(self, terminal):
+        if self.progress != 'Exploring':
+            if terminal:
+                self.score_board += self.score  # score_board maxQ_board以及loss_board是用来统计每轮画图时总的Q值以及loss值的 scord_board只在terminal状态时更新
+
+            self.maxQ_board += self.maxQ  # Q以及loss在每个step都要更新
+            self.loss_board += self.loss
+
+            if self.episode % NUM_PLOT_EPISODE == 0 and self.episode != 0 and terminal:
+                diff_step = self.step - self.step_old
+                tensorboard_info = [self.score_board / NUM_PLOT_EPISODE, self.maxQ_board / diff_step,
+                                    self.loss_board / diff_step]
+
+                for i in range(len(tensorboard_info)):
+                    self.sess.run(self.update_ops[i],
+                                  feed_dict={self.summary_placeholders[i]: float(tensorboard_info[i])})
+                summary_str = self.sess.run(self.summary_op)
+                self.summary_writer.add_summary(summary_str, self.step)
+
+                self.score_board = 0
+                self.maxQ_board = 0
+                self.loss_board = 0
+                self.step_old = self.step
+        else:
+            self.step_old = self.step
+
+    def if_terminal(self):
+        print('Step: ' + str(self.step) + ' / ' +
+              'Episode: ' + str(self.episode) + ' / ' +
+              'Progress: ' + self.progress + ' / ' +
+              'Epsilon: ' + str(self.epsilon) + ' / ' +
+              'Score: ' + str(self.score))
+
+        if self.progress != 'Exploring':
+            self.episode += 1
+        self.score = 0
+
+        observation = self.env.reset()
+        state = self.process_image(observation)
+        state_set = np.stack(tuple([state] * FRAME_STACKING), axis=2)
+        # state_set = state_set.reshape(1, state_set.shape[0], state_set.shape[1], state_set.shape[2])
+
+        return state_set
 
 
 if __name__ == '__main__':
-    main()
+    agent = DQN()
+    agent.main()
